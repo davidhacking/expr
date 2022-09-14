@@ -2,11 +2,11 @@ package vm
 
 import (
 	"fmt"
+	"github.com/antonmedv/expr/file"
 	"reflect"
 	"regexp"
 	"strings"
-
-	"github.com/antonmedv/expr/file"
+	"sync"
 )
 
 var errorType = reflect.TypeOf((*error)(nil)).Elem()
@@ -47,8 +47,15 @@ func Debug() *VM {
 	return vm
 }
 
+var (
+	stackPool = sync.Pool{New: func() any {
+		return make([]interface{}, 0, 32)
+	}}
+)
+
 func (vm *VM) Run(program *Program, env interface{}) (out interface{}, err error) {
 	defer func() {
+		stackPool.Put(vm.stack)
 		if r := recover(); r != nil {
 			f := &file.Error{
 				Location: program.Locations[vm.pp],
@@ -59,15 +66,13 @@ func (vm *VM) Run(program *Program, env interface{}) (out interface{}, err error
 	}()
 
 	vm.limit = MemoryBudget
-	vm.memory = 0
 	vm.ip = 0
 	vm.pp = 0
 
 	if vm.stack == nil {
-		vm.stack = make([]interface{}, 0, 2)
-	} else {
-		vm.stack = vm.stack[0:0]
+		vm.stack = stackPool.Get().([]interface{})
 	}
+	vm.stack = vm.stack[0:0]
 
 	if vm.scopes != nil {
 		vm.scopes = vm.scopes[0:0]
@@ -304,7 +309,13 @@ func (vm *VM) Run(program *Program, env interface{}) (out interface{}, err error
 			for i := call.Size - 1; i >= 0; i-- {
 				in[i] = vm.pop()
 			}
-			fn := FetchFn(env, call.Name).Interface()
+			var fn interface{}
+			if m, ok := env.(map[string]interface{}); ok {
+				fn, _ = m[call.Name]
+			}
+			if fn == nil {
+				fn = FetchFn(env, call.Name).Interface()
+			}
 			if typed, ok := fn.(func(...interface{}) interface{}); ok {
 				vm.push(typed(in...))
 			} else if typed, ok := fn.(func(...interface{}) (interface{}, error)); ok {
